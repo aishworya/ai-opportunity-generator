@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+venv/
+opportunities.json
+temp_audio.wav
