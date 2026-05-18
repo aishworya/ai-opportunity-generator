@@ -1,441 +1,383 @@
 import streamlit as st
-import json
-import random
-import datetime
-import os
+from dotenv import load_dotenv
+from streamlit_mic_recorder import mic_recorder
 from openai import OpenAI
+from datetime import datetime
+import tempfile
 
-# -----------------------------
+from ai_engine import generate_ai_response
+
+from storage import (
+    load_opportunities,
+    create_opportunity,
+    update_opportunity,
+    delete_opportunity
+)
+
+# -----------------------------------
+# LOAD ENV
+# -----------------------------------
+
+load_dotenv()
+
+client = OpenAI()
+
+# -----------------------------------
 # PAGE CONFIG
-# -----------------------------
+# -----------------------------------
+
 st.set_page_config(
-    page_title="AI Opportunity Generator",
+    page_title="AI CRM Opportunity Generator",
     layout="wide"
 )
 
-st.title("AI Opportunity Generator")
+# -----------------------------------
+# SESSION STATE DEFAULTS
+# -----------------------------------
 
-# -----------------------------
-# OPENAI CLIENT
-# -----------------------------
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
-# -----------------------------
-# JSON STORAGE FILE
-# -----------------------------
-DATA_FILE = "opportunities.json"
-
-# -----------------------------
-# LOAD OPPORTUNITIES
-# -----------------------------
-def load_opportunities():
-
-    if os.path.exists(DATA_FILE):
-
-        with open(DATA_FILE, "r") as file:
-            return json.load(file)
-
-    return []
-
-# -----------------------------
-# SAVE OPPORTUNITIES
-# -----------------------------
-def save_opportunities(data):
-
-    with open(DATA_FILE, "w") as file:
-        json.dump(data, file, indent=4)
-
-# -----------------------------
-# SAFE SOLUTION FORMATTER
-# -----------------------------
-def display_solution_products(solution_products):
-
-    if isinstance(solution_products, str):
-
-        try:
-            solution_products = json.loads(solution_products)
-
-        except:
-            solution_products = [solution_products]
-
-    if not solution_products:
-        st.info("No solution products available.")
-        return
-
-    for item in solution_products:
-
-        # CASE 1 -> DICTIONARY FORMAT
-        if isinstance(item, dict):
-
-            product = item.get(
-                "product",
-                "Unknown Product"
-            )
-
-            quantity = item.get(
-                "quantity",
-                "N/A"
-            )
-
-            st.write(
-                f"- {product} : {quantity}"
-            )
-
-        # CASE 2 -> STRING FORMAT
-        else:
-
-            st.write(f"- {item}")
-
-# -----------------------------
-# SESSION STATE
-# -----------------------------
-if "opportunities" not in st.session_state:
-    st.session_state.opportunities = load_opportunities()
-
-if "edit_index" not in st.session_state:
-    st.session_state.edit_index = None
-
-if "view_index" not in st.session_state:
-    st.session_state.view_index = None
-
-if "generated" not in st.session_state:
-    st.session_state.generated = False
-
-if "voice_text" not in st.session_state:
-    st.session_state.voice_text = ""
-
-# -----------------------------
-# DEFAULT FORM VALUES
-# -----------------------------
-default_data = {
+default_values = {
+    "edit_mode": False,
+    "edit_opportunity_number": "",
+    "view_opportunity": None,
+    "ai_generated": False,
+    "customer_requirement": "",
     "opportunity_name": "",
     "opportunity_type": "",
     "deal_size": "",
-    "commit_status": "No",
-    "estimated_close_date": "",
-    "estimated_hardware_value": "",
-    "estimated_software_value": "",
-    "estimated_services_value": "",
-    "customer_need": "",
-    "solution_products": []
+    "commit_status": "",
+    "estimated_close_date": None,
+    "hardware_value": "",
+    "software_value": "",
+    "services_value": "",
+    "solution_bundle": [],
+    "last_audio": None
 }
 
-if "form_data" not in st.session_state:
-    st.session_state.form_data = default_data.copy()
+for key, value in default_values.items():
 
-# -----------------------------
-# VOICE TO TEXT SECTION
-# -----------------------------
-st.subheader("Opportunity Quick Create")
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-st.markdown("### Describe Customer Need")
+# -----------------------------------
+# TITLE
+# -----------------------------------
 
-customer_need = st.text_area(
-    "",
-    value=st.session_state.form_data["customer_need"],
-    height=150
+st.title("AI CRM Opportunity Generator")
+
+# -----------------------------------
+# CUSTOMER REQUIREMENT
+# -----------------------------------
+
+st.subheader("Describe Customer Need")
+
+customer_requirement = st.text_area(
+    "Customer Requirement",
+    value=st.session_state.customer_requirement,
+    height=180,
+    placeholder="Describe customer needs here or use voice input below..."
 )
 
-# -----------------------------
+st.session_state.customer_requirement = customer_requirement
+
+# -----------------------------------
 # VOICE INPUT
-# -----------------------------
-st.markdown("#### Voice Input")
+# -----------------------------------
 
-audio_file = st.audio_input("Click to record voice")
+st.write("Voice Input")
 
-if audio_file is not None:
+audio = mic_recorder(
+    start_prompt="Start Recording",
+    stop_prompt="Stop Recording",
+    just_once=True,
+    use_container_width=True,
+    key="recorder"
+)
 
-    with st.spinner("Transcribing voice to text..."):
+if audio:
 
-        try:
+    audio_bytes = audio["bytes"]
 
-            transcript = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=audio_file
+    if audio_bytes != st.session_state.last_audio:
+
+        st.session_state.last_audio = audio_bytes
+
+        with st.spinner("Transcribing audio..."):
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".wav"
+            ) as temp_audio:
+
+                temp_audio.write(audio_bytes)
+                temp_audio_path = temp_audio.name
+
+            with open(temp_audio_path, "rb") as audio_file:
+
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file
+                )
+
+            st.session_state.customer_requirement = (
+                transcript.text
             )
 
-            transcribed_text = transcript.text
+        st.success("Voice converted to text")
 
-            st.session_state.form_data[
-                "customer_need"
-            ] = transcribed_text
+        st.rerun()
 
-            st.success(
-                "Voice converted to text successfully"
-            )
+# -----------------------------------
+# AI FIELD POPULATION
+# -----------------------------------
 
-            st.text_area(
-                "Transcribed Text",
-                value=transcribed_text,
-                height=120
-            )
+def populate_ai_fields(ai_data):
 
-            customer_need = transcribed_text
+    st.session_state.opportunity_name = ai_data.get(
+        "opportunity_name",
+        ""
+    )
 
-        except Exception as e:
+    st.session_state.opportunity_type = ai_data.get(
+        "opportunity_type",
+        "Hardware"
+    )
 
-            st.error(
-                f"Voice transcription failed: {e}"
-            )
+    st.session_state.deal_size = ai_data.get(
+        "deal_size",
+        ""
+    )
 
-# -----------------------------
-# BUTTON SECTION
-# -----------------------------
-col1, col2 = st.columns([3, 3])
+    st.session_state.commit_status = ai_data.get(
+        "commit_status",
+        "Pipeline"
+    )
+
+    date_string = ai_data.get(
+        "estimated_close_date",
+        ""
+    )
+
+    try:
+
+        parsed_date = datetime.strptime(
+            date_string,
+            "%Y-%m-%d"
+        ).date()
+
+        st.session_state.estimated_close_date = parsed_date
+
+    except:
+
+        st.session_state.estimated_close_date = None
+
+    st.session_state.hardware_value = ai_data.get(
+        "estimated_hardware_value",
+        ""
+    )
+
+    st.session_state.software_value = ai_data.get(
+        "estimated_software_value",
+        ""
+    )
+
+    st.session_state.services_value = ai_data.get(
+        "estimated_services_value",
+        ""
+    )
+
+    st.session_state.solution_bundle = ai_data.get(
+        "solution_bundle",
+        []
+    )
+
+    st.session_state.ai_generated = True
+
+# -----------------------------------
+# AI BUTTONS
+# -----------------------------------
+
+col1, col2 = st.columns(2)
 
 with col1:
 
-    generate_clicked = st.button(
-        "Generate New Opportunity and Solution with AI",
-        use_container_width=True
-    )
-
-with col2:
-
-    if st.session_state.edit_index is not None:
+    if st.session_state.edit_mode:
 
         regenerate_clicked = st.button(
-            "Regenerate Opportunity and Solution with AI",
+            "Regenerate Opportunity & Solution with AI",
             use_container_width=True
         )
 
-    else:
-
-        regenerate_clicked = False
-
-# -----------------------------
-# AI GENERATION
-# -----------------------------
-if generate_clicked or regenerate_clicked:
-
-    if customer_need.strip() == "":
-
-        st.warning(
-            "Please enter customer requirement"
-        )
-
-    else:
-
-        with st.spinner(
-            "Generating opportunity using AI..."
-        ):
+        if regenerate_clicked:
 
             try:
 
-                prompt = f"""
-                You are a CRM sales assistant.
+                with st.spinner("Generating AI solution..."):
 
-                Based on this customer requirement:
-                {customer_need}
-
-                Generate:
-                1. Opportunity Name
-                2. Opportunity Type
-                3. Deal Size
-                4. Commit Status
-                5. Estimated Close Date
-                6. Estimated Hardware Value
-                7. Estimated Software Value
-                8. Estimated Services Value
-                9. Suggested Solution Products
-
-                Return ONLY valid JSON.
-                """
-
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content":
-                            "You are a CRM sales assistant."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    response_format={
-                        "type": "json_object"
-                    }
-                )
-
-                ai_data = json.loads(
-                    response.choices[0]
-                    .message.content
-                )
-
-                st.session_state.form_data = {
-
-                    "opportunity_name":
-                    ai_data.get(
-                        "Opportunity Name",
-                        "School Infrastructure Setup"
-                    ),
-
-                    "opportunity_type":
-                    ai_data.get(
-                        "Opportunity Type",
-                        "Hardware"
-                    ),
-
-                    "deal_size":
-                    ai_data.get(
-                        "Deal Size",
-                        "500000"
-                    ),
-
-                    "commit_status":
-                    ai_data.get(
-                        "Commit Status",
-                        "No"
-                    ),
-
-                    "estimated_close_date":
-                    ai_data.get(
-                        "Estimated Close Date",
-                        "2026-06-30"
-                    ),
-
-                    "estimated_hardware_value":
-                    ai_data.get(
-                        "Estimated Hardware Value",
-                        "300000"
-                    ),
-
-                    "estimated_software_value":
-                    ai_data.get(
-                        "Estimated Software Value",
-                        "100000"
-                    ),
-
-                    "estimated_services_value":
-                    ai_data.get(
-                        "Estimated Services Value",
-                        "100000"
-                    ),
-
-                    "customer_need":
-                    customer_need,
-
-                    "solution_products":
-                    ai_data.get(
-                        "Suggested Solution Products",
-                        [
-                            {
-                                "product":
-                                "Dell Monitor",
-
-                                "quantity":
-                                50
-                            },
-                            {
-                                "product":
-                                "HP Keyboard",
-
-                                "quantity":
-                                50
-                            }
-                        ]
+                    ai_data = generate_ai_response(
+                        st.session_state.customer_requirement
                     )
-                }
 
-                st.session_state.generated = True
+                populate_ai_fields(ai_data)
 
                 st.success(
-                    "AI generated opportunity "
-                    "and solution successfully"
+                    "Opportunity regenerated successfully"
                 )
-
-                st.rerun()
 
             except Exception as e:
 
-                st.error(
-                    f"AI Generation Failed: {e}"
+                st.error(str(e))
+
+    else:
+
+        generate_clicked = st.button(
+            "Generate New Opportunity & Solution with AI",
+            use_container_width=True
+        )
+
+        if generate_clicked:
+
+            try:
+
+                with st.spinner("Generating AI solution..."):
+
+                    ai_data = generate_ai_response(
+                        st.session_state.customer_requirement
+                    )
+
+                populate_ai_fields(ai_data)
+
+                st.success(
+                    "Opportunity generated successfully"
                 )
 
-# -----------------------------
+            except Exception as e:
+
+                st.error(str(e))
+
+with col2:
+
+    if st.session_state.edit_mode:
+
+        new_clicked = st.button(
+            "Generate New Opportunity & Solution with AI",
+            use_container_width=True
+        )
+
+        if new_clicked:
+
+            st.session_state.edit_mode = False
+            st.session_state.edit_opportunity_number = ""
+            st.session_state.ai_generated = False
+
+            st.session_state.customer_requirement = ""
+            st.session_state.opportunity_name = ""
+            st.session_state.opportunity_type = "Hardware"
+            st.session_state.deal_size = ""
+            st.session_state.commit_status = "Pipeline"
+            st.session_state.estimated_close_date = None
+            st.session_state.hardware_value = ""
+            st.session_state.software_value = ""
+            st.session_state.services_value = ""
+            st.session_state.solution_bundle = []
+
+            st.rerun()
+
+# -----------------------------------
 # OPPORTUNITY DETAILS
-# -----------------------------
-st.header("Opportunity Details")
+# -----------------------------------
 
-fd = st.session_state.form_data
+st.divider()
 
-fd["opportunity_name"] = st.text_input(
+st.subheader("Opportunity Details")
+
+st.text_input(
     "Opportunity Name",
-    value=fd["opportunity_name"]
+    key="opportunity_name"
 )
 
 opportunity_types = [
+    "Select Opportunity Type",
     "Hardware",
     "Software",
     "Networking",
-    "Cloud Infra",
+    "Cloud Infrastructure",
+    "Security",
     "Services"
 ]
 
-selected_type = fd["opportunity_type"]
+selected_index = 0
 
-if selected_type not in opportunity_types:
-    selected_type = "Hardware"
+if st.session_state.opportunity_type in opportunity_types:
+    selected_index = opportunity_types.index(
+        st.session_state.opportunity_type
+    )
 
-fd["opportunity_type"] = st.selectbox(
+st.selectbox(
     "Opportunity Type",
     opportunity_types,
-    index=opportunity_types.index(
-        selected_type
+    index=selected_index,
+    key="opportunity_type"
+)
+
+col3, col4 = st.columns(2)
+
+with col3:
+
+    st.text_input(
+        "Deal Size",
+        key="deal_size"
     )
-)
 
-fd["deal_size"] = st.text_input(
-    "Deal Size",
-    value=fd["deal_size"]
-)
+with col4:
 
-fd["commit_status"] = st.selectbox(
-    "Commit Opportunity",
-    ["Yes", "No"],
-    index=0 if
-    fd["commit_status"] == "Yes"
-    else 1
-)
+    st.selectbox(
+        "Commit Status",
+        [
+            "Committed",
+            "Pipeline",
+            "Upside"
+        ],
+        key="commit_status"
+    )
 
-fd["estimated_close_date"] = st.text_input(
+st.date_input(
     "Estimated Close Date",
-    value=fd["estimated_close_date"]
+    key="estimated_close_date"
 )
 
-fd["estimated_hardware_value"] = st.text_input(
-    "Estimated Hardware Value",
-    value=fd["estimated_hardware_value"]
-)
+col5, col6, col7 = st.columns(3)
 
-fd["estimated_software_value"] = st.text_input(
-    "Estimated Software Value",
-    value=fd["estimated_software_value"]
-)
+with col5:
 
-fd["estimated_services_value"] = st.text_input(
-    "Estimated Services Value",
-    value=fd["estimated_services_value"]
-)
+    st.text_input(
+        "Estimated Hardware Value",
+        key="hardware_value"
+    )
 
-# -----------------------------
+with col6:
+
+    st.text_input(
+        "Estimated Software Value",
+        key="software_value"
+    )
+
+with col7:
+
+    st.text_input(
+        "Estimated Services Value",
+        key="services_value"
+    )
+
+# -----------------------------------
 # SUBMIT BUTTON
-# -----------------------------
+# -----------------------------------
+
+st.divider()
+
 submit_label = (
-
     "Resubmit Opportunity Manually"
-
-    if st.session_state.edit_index
-    is not None
-
-    else
-
-    "Submit Opportunity Manually"
+    if st.session_state.edit_mode
+    else "Submit Opportunity Manually"
 )
 
 submit_clicked = st.button(
@@ -443,176 +385,241 @@ submit_clicked = st.button(
     use_container_width=True
 )
 
-# -----------------------------
-# AI SUGGESTED SOLUTION
-# -----------------------------
-if st.session_state.generated:
-
-    st.header("AI Suggested Solution")
-
-    solution_products = fd.get(
-        "solution_products",
-        []
-    )
-
-    display_solution_products(
-        solution_products
-    )
-
-# -----------------------------
-# SUBMIT LOGIC
-# -----------------------------
 if submit_clicked:
 
-    opportunity_number = (
-        f"OPP-{random.randint(10000,99999)}"
-    )
+    opportunity_data = {
+        "customer_requirement":
+            st.session_state.customer_requirement,
 
-    created_when = str(
-        datetime.datetime.now()
-    )
+        "opportunity_name":
+            st.session_state.opportunity_name,
 
-    record = {
-        "opportunity_number":
-        opportunity_number,
+        "opportunity_type":
+            st.session_state.opportunity_type,
 
-        "created_when":
-        created_when,
+        "deal_size":
+            st.session_state.deal_size,
 
-        **fd
+        "commit_status":
+            st.session_state.commit_status,
+
+        "estimated_close_date":
+            str(st.session_state.estimated_close_date),
+
+        "hardware_value":
+            st.session_state.hardware_value,
+
+        "software_value":
+            st.session_state.software_value,
+
+        "services_value":
+            st.session_state.services_value,
+
+        "solution_bundle":
+            st.session_state.solution_bundle
     }
 
-    if st.session_state.edit_index is not None:
+    if st.session_state.edit_mode:
 
-        old_record = (
-            st.session_state.opportunities[
-                st.session_state.edit_index
-            ]
+        opportunity_data["opportunity_number"] = (
+            st.session_state.edit_opportunity_number
         )
 
-        record["opportunity_number"] = (
-            old_record["opportunity_number"]
-        )
+        existing_opportunities = load_opportunities()
 
-        record["created_when"] = (
-            old_record["created_when"]
-        )
+        for opp in existing_opportunities:
 
-        st.session_state.opportunities[
-            st.session_state.edit_index
-        ] = record
+            if (
+                opp["opportunity_number"]
+                ==
+                st.session_state.edit_opportunity_number
+            ):
 
-        st.success(
-            "Opportunity updated successfully"
-        )
+                opportunity_data["created_on"] = (
+                    opp["created_on"]
+                )
 
-        st.session_state.edit_index = None
+                break
+
+        update_opportunity(opportunity_data)
+
+        st.success("Opportunity updated successfully")
+
+        st.session_state.edit_mode = False
 
     else:
 
-        st.session_state.opportunities.append(
-            record
-        )
+        create_opportunity(opportunity_data)
 
-        st.success(
-            "Opportunity created successfully"
-        )
+        st.success("Opportunity created successfully")
 
-    save_opportunities(
-        st.session_state.opportunities
-    )
+# -----------------------------------
+# AI SOLUTION
+# -----------------------------------
 
-    st.session_state.form_data = (
-        default_data.copy()
-    )
-
-    st.session_state.generated = False
-
-    st.rerun()
-
-# -----------------------------
-# CREATED OPPORTUNITIES
-# -----------------------------
-st.header("Created Opportunities")
-
-for index, opp in enumerate(
-    st.session_state.opportunities
-):
-
-    c1, c2, c3, c4 = st.columns(
-        [6, 1, 1, 1]
-    )
-
-    with c1:
-
-        st.write(
-            f"{opp['opportunity_number']} - "
-            f"{opp['opportunity_name']}"
-        )
-
-    with c2:
-
-        if st.button(
-            "View",
-            key=f"view_{index}"
-        ):
-
-            st.session_state.view_index = index
-
-            st.rerun()
-
-    with c3:
-
-        if st.button(
-            "Edit",
-            key=f"edit_{index}"
-        ):
-
-            st.session_state.form_data = opp
-
-            st.session_state.edit_index = index
-
-            st.session_state.generated = True
-
-            st.rerun()
-
-    with c4:
-
-        if st.button(
-            "Delete",
-            key=f"delete_{index}"
-        ):
-
-            st.session_state.opportunities.pop(
-                index
-            )
-
-            save_opportunities(
-                st.session_state.opportunities
-            )
-
-            st.success(
-                "Opportunity deleted"
-            )
-
-            st.rerun()
-
-# -----------------------------
-# VIEW OPPORTUNITY
-# -----------------------------
-if st.session_state.view_index is not None:
+if st.session_state.ai_generated:
 
     st.divider()
 
-    selected = (
-        st.session_state.opportunities[
-            st.session_state.view_index
-        ]
+    st.subheader("AI Suggested Solution")
+
+    table_data = []
+
+    for item in st.session_state.solution_bundle:
+
+        table_data.append({
+
+            "Category": item.get(
+                "category",
+                "Hardware"
+            ),
+
+            "Item": item.get(
+                "item",
+                item.get("product", "")
+            ),
+
+            "Quantity": item.get(
+                "quantity",
+                ""
+            )
+        })
+
+    st.table(table_data)
+
+    st.subheader("AI Reasoning")
+
+    for item in st.session_state.solution_bundle:
+
+        reason = item.get(
+            "reason",
+            ""
+        )
+
+        item_name = item.get(
+            "item",
+            item.get("product", "")
+        )
+
+        st.markdown(
+            f"""
+### {item_name}
+
+- {reason}
+"""
+        )
+
+# -----------------------------------
+# CREATED OPPORTUNITIES
+# -----------------------------------
+
+st.divider()
+
+st.subheader("Created Opportunities")
+
+opportunities = load_opportunities()
+
+for opp in opportunities:
+
+    col8, col9, col10, col11 = st.columns(
+        [5, 1, 1, 1]
     )
 
-    st.header(
-        "Opportunity Details View"
-    )
+    with col8:
+
+        st.write(
+            f"{opp['opportunity_number']} | "
+            f"{opp['opportunity_name']}"
+        )
+
+    with col9:
+
+        if st.button(
+            "View",
+            key=f"view_{opp['opportunity_number']}"
+        ):
+
+            st.session_state.view_opportunity = opp
+
+    with col10:
+
+        if st.button(
+            "Edit",
+            key=f"edit_{opp['opportunity_number']}"
+        ):
+
+            st.session_state.edit_mode = True
+
+            st.session_state.edit_opportunity_number = (
+                opp["opportunity_number"]
+            )
+
+            st.session_state.customer_requirement = (
+                opp["customer_requirement"]
+            )
+
+            st.session_state.opportunity_name = (
+                opp["opportunity_name"]
+            )
+
+            st.session_state.opportunity_type = (
+                opp["opportunity_type"]
+            )
+
+            st.session_state.deal_size = (
+                opp["deal_size"]
+            )
+
+            st.session_state.commit_status = (
+                opp["commit_status"]
+            )
+
+            st.session_state.hardware_value = (
+                opp["hardware_value"]
+            )
+
+            st.session_state.software_value = (
+                opp["software_value"]
+            )
+
+            st.session_state.services_value = (
+                opp["services_value"]
+            )
+
+            st.session_state.solution_bundle = (
+                opp["solution_bundle"]
+            )
+
+            st.session_state.ai_generated = True
+
+            st.rerun()
+
+    with col11:
+
+        if st.button(
+            "Delete",
+            key=f"delete_{opp['opportunity_number']}"
+        ):
+
+            delete_opportunity(
+                opp["opportunity_number"]
+            )
+
+            st.success("Opportunity deleted")
+
+            st.rerun()
+
+# -----------------------------------
+# VIEW OPPORTUNITY
+# -----------------------------------
+
+if st.session_state.view_opportunity:
+
+    st.divider()
+
+    st.subheader("Opportunity Details View")
+
+    selected = st.session_state.view_opportunity
 
     st.write(
         f"Opportunity Number: "
@@ -645,40 +652,79 @@ if st.session_state.view_index is not None:
     )
 
     st.write(
-        f"Estimated Hardware Value: "
-        f"{selected['estimated_hardware_value']}"
+        f"Hardware Value: "
+        f"{selected['hardware_value']}"
     )
 
     st.write(
-        f"Estimated Software Value: "
-        f"{selected['estimated_software_value']}"
+        f"Software Value: "
+        f"{selected['software_value']}"
     )
 
     st.write(
-        f"Estimated Services Value: "
-        f"{selected['estimated_services_value']}"
+        f"Services Value: "
+        f"{selected['services_value']}"
     )
 
     st.write(
-        f"Customer Need: "
-        f"{selected['customer_need']}"
+        f"Created On: "
+        f"{selected['created_on']}"
     )
 
-    st.subheader("Associated Solution")
+    st.subheader("Associated AI Solution")
 
-    solution_products = selected.get(
-        "solution_products",
-        []
-    )
+    table_data = []
 
-    display_solution_products(
-        solution_products
-    )
+    for item in selected["solution_bundle"]:
+
+        table_data.append({
+
+            "Category": item.get(
+                "category",
+                "Hardware"
+            ),
+
+            "Item": item.get(
+                "item",
+                item.get("product", "")
+            ),
+
+            "Quantity": item.get(
+                "quantity",
+                ""
+            )
+        })
+
+    st.table(table_data)
+
+    st.subheader("AI Reasoning")
+
+    for item in selected["solution_bundle"]:
+
+        item_name = item.get(
+            "item",
+            item.get("product", "")
+        )
+
+        reason = item.get(
+            "reason",
+            ""
+        )
+
+        st.markdown(
+            f"""
+### {item_name}
+
+- {reason}
+"""
+        )
 
     if st.button(
-        "Close Opportunity View"
+        "Close Opportunity View",
+        key="close_opportunity_view",
+        use_container_width=True
     ):
 
-        st.session_state.view_index = None
+        st.session_state.view_opportunity = None
 
         st.rerun()
